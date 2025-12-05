@@ -1,2 +1,137 @@
 # Agro-x-hackathon-project
 Submission of the agro-x hackathon competition on behalf of skikda iTech club
+# ==============================================================================
+# --- IMPORTS ---
+# ==============================================================================
+
+import pandas as pd
+import numpy as np
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.impute import SimpleImputer
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import roc_auc_score
+import joblib
+
+# ==============================================================================
+# --- LOAD AND PREPROCESS DATA ---
+# ==============================================================================
+
+df = pd.read_csv("genus_data.csv")
+
+numeric_cols = ['C_value', 'tavg', 'perc_ag', 'perc_per', 'HybProp', 'Hyb_Ratio']
+for col in numeric_cols:
+    df[col] = pd.to_numeric(df[col], errors='coerce')
+    df[col].fillna(df[col].median(), inplace=True)
+
+# ==============================================================================
+# --- PREPARE PAIR DATA ---
+# ==============================================================================
+
+core_features = ['C_value', 'tavg', 'perc_ag', 'perc_per', 'HybProp', 'Hyb_Ratio']
+imputer = SimpleImputer(strategy='median')
+
+df_imputed = df[['Genus', 'Family'] + core_features].copy()
+df_imputed[core_features] = imputer.fit_transform(df_imputed[core_features])
+
+N_GENERA = len(df_imputed)
+N_PAIRS = 5000
+
+np.random.seed(42)
+idx_A = np.random.randint(0, N_GENERA, N_PAIRS)
+idx_B = np.random.randint(0, N_GENERA, N_PAIRS)
+mask = idx_A != idx_B
+idx_A, idx_B = idx_A[mask], idx_B[mask]
+N_PAIRS = len(idx_A)
+
+df_pair = pd.DataFrame({
+    'Genus_A': df_imputed.iloc[idx_A]['Genus'].values,
+    'Genus_B': df_imputed.iloc[idx_B]['Genus'].values,
+    'Family_A': df_imputed.iloc[idx_A]['Family'].values,
+    'Family_B': df_imputed.iloc[idx_B]['Family'].values,
+    'C_value_A': df_imputed.iloc[idx_A]['C_value'].values,
+    'C_value_B': df_imputed.iloc[idx_B]['C_value'].values,
+    'tavg_A': df_imputed.iloc[idx_A]['tavg'].values,
+    'tavg_B': df_imputed.iloc[idx_B]['tavg'].values,
+    'perc_ag_A': df_imputed.iloc[idx_A]['perc_ag'].values,
+    'perc_ag_B': df_imputed.iloc[idx_B]['perc_ag'].values,
+    'perc_per_A': df_imputed.iloc[idx_A]['perc_per'].values,
+    'perc_per_B': df_imputed.iloc[idx_B]['perc_per'].values,
+    'HybProp_A': df_imputed.iloc[idx_A]['HybProp'].values,
+    'HybProp_B': df_imputed.iloc[idx_B]['HybProp'].values,
+})
+
+# ==============================================================================
+# --- FEATURE ENGINEERING (6 FEATURES) ---
+# ==============================================================================
+
+df_pair['C_value_ABS_DIFF'] = np.abs(df_pair['C_value_A'] - df_pair['C_value_B'])
+df_pair['C_value_RATIO'] = df_pair[['C_value_A', 'C_value_B']].max(axis=1) / df_pair[['C_value_A', 'C_value_B']].min(axis=1)
+df_pair['Same_Family'] = (df_pair['Family_A'] == df_pair['Family_B']).astype(int)
+df_pair['tavg_ABS_DIFF'] = np.abs(df_pair['tavg_A'] - df_pair['tavg_B'])
+df_pair['perc_ag_SUM'] = df_pair['perc_ag_A'] + df_pair['perc_ag_B']
+df_pair['perc_per_SUM'] = df_pair['perc_per_A'] + df_pair['perc_per_B']  # New 6th feature
+
+# ==============================================================================
+# --- TARGET LABEL ---
+# ==============================================================================
+
+df_pair['Hybridization_Score'] = (df_pair['HybProp_A'] + df_pair['HybProp_B']) / 2
+threshold = 0.05
+df_pair['Hybridization_Success'] = (df_pair['Hybridization_Score'] > threshold).astype(int)
+
+# ==============================================================================
+# --- MODEL TRAINING ---
+# ==============================================================================
+
+features = [
+    'C_value_ABS_DIFF', 'C_value_RATIO', 'Same_Family',
+    'tavg_ABS_DIFF', 'perc_ag_SUM', 'perc_per_SUM'  # 6 features
+]
+
+X = df_pair[features]
+y = df_pair['Hybridization_Success']
+
+# Split data
+X_train, X_test, y_train, y_test = train_test_split(
+    X, y, test_size=0.2, random_state=42, stratify=y
+)
+
+# Imputer
+imputer = SimpleImputer(strategy='median')
+X_train_imputed = imputer.fit_transform(X_train)
+X_test_imputed = imputer.transform(X_test)
+
+# Train Random Forest
+rf_classifier = RandomForestClassifier(
+    n_estimators=300,
+    max_depth=12,
+    random_state=42,
+    class_weight='balanced'
+)
+rf_classifier.fit(X_train_imputed, y_train)
+
+# Evaluate
+Y_pred_proba = rf_classifier.predict_proba(X_test_imputed)[:, 1]
+auc_score = roc_auc_score(y_test, Y_pred_proba)
+print("AUC Score:", auc_score)
+
+# ==============================================================================
+# --- SAVE MODEL AND IMPUTER ---
+# ==============================================================================
+
+joblib.dump(rf_classifier, "hybrid_model1.pkl")
+joblib.dump(imputer, "imputer1.pkl")
+print("Model and imputer saved with 6 features!")
+
+# ==============================================================================
+# --- TOP 10 PREDICTED PAIRS ---
+# ==============================================================================
+
+df_ranking = X_test.copy()
+df_ranking['Probability'] = Y_pred_proba
+df_ranking['Genus_A'] = df_pair.iloc[y_test.index]['Genus_A'].values
+df_ranking['Genus_B'] = df_pair.iloc[y_test.index]['Genus_B'].values
+
+top_pairs = df_ranking.sort_values(by='Probability', ascending=False).head(10)
+print("\nTop 10 Predicted Hybridization Pairs:")
+print(top_pairs[['Genus_A', 'Genus_B', 'Probability']])
